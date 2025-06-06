@@ -1,0 +1,50 @@
+version: 2.1 # use CircleCI 2.1
+orbs:
+    gcp-cli: circleci/gcp-cli@1.8.3
+    gcp-artifactory: spruceholdings/google-artifactory-orb@1.1.0
+
+jobs:
+    webpage-printer-service-build:
+        working_directory: ~/project/webpage-printer-service
+        docker:
+            - image: cimg/node:18.4.0
+        parameters:
+            tags:
+                type: string
+                default: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+        steps:
+            - checkout:
+                  path: ~/project
+
+            - setup_remote_docker:
+                  docker_layer_caching: false
+
+# If/when we move to Google Artifact Registry, this can be uncommented.
+            - gcp-cli/install:
+                version: 438.0.0
+            - gcp-cli/initialize
+            - gcp-artifactory/build-and-push:
+                  registry-url: us-central1-docker.pkg.dev
+                  image: webpage-printer-service
+                  extra_build_args: --build-arg NPM_LOG_LEVEL=notice --target prod
+                  tag: << parameters.tags >>
+                  google-project-id: 'unique-perigee-171622'
+                  repository: spruce-prod-registry
+
+workflows:
+    webpage-printer-service-workflow:
+        jobs:
+            - webpage-printer-service-build:
+                context: service-builds
+                filters:
+                    branches:
+                        ignore:
+                            - main
+            - webpage-printer-service-build:
+                name: webpage-printer-service-build-production
+                context: service-builds
+                tags: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1,prod-latest"
+                filters:
+                    branches:
+                        only:
+                            - main

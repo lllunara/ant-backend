@@ -1,0 +1,116 @@
+.docker-build:
+  image: gitlab-docker.artifactory.zgtools.net/docker:27.5-cli
+  variables:
+    # Required variables
+    GAR_PROJECT_ID: ""      # Google Cloud project ID
+    GAR_LOCATION: ""        # Artifact Registry location (e.g., us-east1)
+    GAR_REPOSITORY_NAME: "" # Repository name in Artifact Registry
+    IMAGE_NAME: ""          # Name of your Docker image
+    
+    # Optional variables with defaults
+    DOCKERFILE_PATH: "Dockerfile"
+    DOCKER_CONTEXT: "."
+    BUILD_ARGS: ""          # Comma-separated list of build args
+    CACHE_FROM: ""          # Comma-separated list of cache sources
+    ADDITIONAL_TAGS: ""     # Comma-separated list of additional tags
+    DOCKER_BUILD_EXTRA_ARGS: "" # Additional arguments for docker build
+    ADDITIONAL_BEFORE_SCRIPT: "" # Additional commands to run in before_script
+    
+    # Default tags
+    DEFAULT_TAG: "${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}"
+    
+    # Internal variables
+    GAR_HOST: "${GAR_LOCATION}-docker.pkg.dev"
+    IMAGE_PATH: "${GAR_LOCATION}-docker.pkg.dev/${GAR_PROJECT_ID}/${GAR_REPOSITORY_NAME}/${IMAGE_NAME}"
+  
+  before_script:
+    - |
+      # Execute additional before_script commands if specified
+      if [ -n "$ADDITIONAL_BEFORE_SCRIPT" ]; then
+        echo "Executing additional before_script commands..."
+        eval "$ADDITIONAL_BEFORE_SCRIPT"
+      fi
+    
+    # Authenticate with Google Cloud
+    - |
+      if [ -n "$GCLOUD_SERVICE_KEY" ]; then
+        cat $GCLOUD_SERVICE_KEY | docker login -u _json_key --password-stdin https://${GAR_HOST}
+      else
+        echo "Error: GCLOUD_SERVICE_KEY not set"
+        exit 1
+      fi
+    
+    # Validate required variables
+    - |
+      if [ -z "$GAR_LOCATION" ]; then
+        echo "Error: GAR_LOCATION is required"
+        exit 1
+      fi
+    - |
+      if [ -z "$GAR_REPOSITORY_NAME" ]; then
+        echo "Error: GAR_REPOSITORY_NAME is required"
+        exit 1
+      fi
+    - |
+      if [ -z "$IMAGE_NAME" ]; then
+        echo "Error: IMAGE_NAME is required"
+        exit 1
+      fi
+  
+  script:
+    - |
+      # Initialize build arguments
+      BUILD_COMMAND="docker build"
+      
+      # Add build context and Dockerfile path
+      BUILD_COMMAND="$BUILD_COMMAND -f $DOCKERFILE_PATH $DOCKER_CONTEXT"
+      
+      # Add build args if specified
+      if [ -n "$BUILD_ARGS" ]; then
+        for arg in $(echo $BUILD_ARGS | tr ',' ' '); do
+          BUILD_COMMAND="$BUILD_COMMAND --build-arg $arg"
+        done
+      fi
+      
+      # Add cache sources if specified
+      if [ -n "$CACHE_FROM" ]; then
+        for cache in $(echo $CACHE_FROM | tr ',' ' '); do
+          BUILD_COMMAND="$BUILD_COMMAND --cache-from $cache"
+        done
+      fi
+      
+      # Add tags
+      BUILD_COMMAND="$BUILD_COMMAND -t $IMAGE_PATH:$DEFAULT_TAG"
+      
+      # Add additional tags if specified
+      if [ -n "$ADDITIONAL_TAGS" ]; then
+        for tag in $(echo $ADDITIONAL_TAGS | tr ',' ' '); do
+          BUILD_COMMAND="$BUILD_COMMAND -t $IMAGE_PATH:$tag"
+        done
+      fi
+      
+      # Add extra build arguments if specified
+      if [ -n "$DOCKER_BUILD_EXTRA_ARGS" ]; then
+        BUILD_COMMAND="$BUILD_COMMAND $DOCKER_BUILD_EXTRA_ARGS"
+      fi
+      
+      # Execute build
+      echo "Executing build command: $BUILD_COMMAND"
+      eval $BUILD_COMMAND
+      
+      # Push all tags
+      echo "Pushing image to Google Artifact Registry..."
+      docker push --all-tags $IMAGE_PATH
+      
+  # Example usage template
+  # .docker-build-example:
+  #   extends: .docker-build
+  #   variables:
+  #     GAR_PROJECT_ID: "my-project"
+  #     GAR_LOCATION: "us-east1"
+  #     GAR_REPOSITORY_NAME: "my-repo"
+  #     IMAGE_NAME: "my-app"
+  #     BUILD_ARGS: "NODE_ENV=production,API_URL=https://api.example.com"
+  #     ADDITIONAL_TAGS: "v1.0.0,staging"
+  #     DOCKERFILE_PATH: "./Dockerfile"
+  #     DOCKER_CONTEXT: "."

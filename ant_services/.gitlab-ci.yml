@@ -1,0 +1,168 @@
+default:  
+  tags:  
+    - build  
+  before_script: 
+  - cd spruce-services/
+
+include:  
+  project: spruce-engineering/devops/shared/gitlab-templates  
+  file:  
+    - docker-build.yml  
+    - checkmarx.yml  
+    - sonarqube.yml  
+
+stages:  
+  - build  
+  - test  
+  - sonarScan  
+  - cxScan  
+
+
+  
+.swagger_deploy_template:
+  stage: build
+  image: gitlab-docker.artifactory.zgtools.net/docker:27.5-cli
+  variables:
+    GCS_BUCKET: ""
+  before_script:
+    - cd swagger
+  script:
+    # - echo "$GCP_SERVICE_ACCOUNT_KEY" > /tmp/service-account-key.json
+    - gcloud auth activate-service-account --key-file="$GCP_SERVICE_ACCOUNT_KEY"
+    - gsutil -m -h "Cache-Control:private,max-age=60" cp -r index.html "gs://${GCS_BUCKET}/api/v4/${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}/index.html"
+    - gsutil -m -h "Cache-Control:private,max-age=60" cp -r swagger_v4.json "gs://${GCS_BUCKET}/api/v4/${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}/swagger_v4.json"
+    - gsutil -m acl -r ch -u AllUsers:R "gs://${GCS_BUCKET}/api/v4/${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHA}/*"
+
+.spruce_service_template: &spruce_service_template
+  extends: .docker-build
+  stage: build
+  needs: [assemble_exclude_cornerstone]
+  variables:
+    ADDITIONAL_BEFORE_SCRIPT: "cd $WORKING_DIRECTORY"
+    BUILD_ARGS: "--JRE_BUILDER_IMAGE=amazoncorretto:17-alpine,DOCKER_BASE_IMAGE=alpine:3.21"
+    CACHE_FROM: "{$GAR_LOCATION}-docker.pkg.dev/$GAR_PROJECT_ID/${GAR_REPOSITORY_NAME}/${IMAGE_NAME}:prod-latest"
+  parallel:
+    matrix:
+      - IMAGE_NAME: "affidavits-service"
+        DOCKER_CONTEXT: "affidavits-service"
+      - IMAGE_NAME: "cd-items-service"
+        DOCKER_CONTEXT: "cd-items-service"
+      - IMAGE_NAME: "cd-service"
+        DOCKER_CONTEXT: "cd-service"
+      - IMAGE_NAME: "closing-service"
+        DOCKER_CONTEXT: "closing-service"
+      - IMAGE_NAME: "commitments-service"
+        DOCKER_CONTEXT: "commitments-service"
+      - IMAGE_NAME: "documents-service"
+        DOCKER_CONTEXT: "documents-service"
+      - IMAGE_NAME: "escrow-service"
+        DOCKER_CONTEXT: "escrow-service"
+      - IMAGE_NAME: "lender-service"
+        DOCKER_CONTEXT: "lender-service"
+      - IMAGE_NAME: "new-order-service"
+        DOCKER_CONTEXT: "new-order-service"
+      - IMAGE_NAME: "policies-service"
+        DOCKER_CONTEXT: "policies-service"
+      - IMAGE_NAME: "policy-exceptions-service"
+        DOCKER_CONTEXT: "policy-exceptions-service"
+      - IMAGE_NAME: "public-documents-service"
+        DOCKER_CONTEXT: "public-documents-service"
+      - IMAGE_NAME: "quotes-service"
+        DOCKER_CONTEXT: "quotes-service"
+      - IMAGE_NAME: "settlement-statements-service"
+        DOCKER_CONTEXT: "settlement-statements-service"
+      - IMAGE_NAME: "title-reports-service"
+        DOCKER_CONTEXT: "title-reports-service"
+
+assemble_exclude_cornerstone:  
+  stage: build  
+  image: gitlab.docker.artifactory.ztools.net/gradle:8.0.2-jdk17-alpine  
+  variables:
+    JWT_SECRET_KEY: "test-jwt-secret-key"
+  needs: []  
+  cache:  
+  - key:  
+      files:  
+        - gradle/wrapper/gradle-wrapper.properties  
+      prefix: gradle-wrapper-cache  
+    paths:  
+      - .gradle/wrapper/  
+  script:  
+    - ./gradlew assemble --max-workers=3 --full-stacktrace -P co.spruce.update-environment-variables=false
+    - ./gradlew test -x :spruce-services:cornerstone:test --max-workers=3 --full-stacktrace
+    - mkdir -p ~/test-results/junit/
+    - find . -type f -regex ".*/build/test-results/.*xml" -exec cp {} ~/test-results/junit/ \;  
+  artifacts:  
+    paths:  
+      - test-results/junit
+    reports:
+      junit: test-results/junit/*.xml  
+
+spruce-services-cornerstone-build:  
+  stage: build  
+  image: gitlab.docker.artifactory.ztools.net/gradle:8.0.2-jdk17-alpine 
+  variables:
+    JWT_SECRET_KEY: "test-jwt-secret-key"
+    RABBITMQ_GRACEFUL_SHUTDOWN_TIMEOUT: 0 
+  needs: []  
+  cache:  
+  - key:  
+      files:  
+        - gradle/wrapper/gradle-wrapper.properties  
+      prefix: gradle-wrapper-cache  
+    paths:  
+      - .gradle/wrapper/   
+  script:  
+    - ./gradlew :spruce-services:cornerstone:assemble --full-stacktrace -P co.spruce.update-environment-variables=false  
+    - ./gradlew :spruce-services:cornerstone:test --full-stacktrace
+
+
+spruce_service_build:
+  <<: *spruce_service_template
+  rules:
+    - if: $CI_COMMIT_REF_NAME != "main"
+
+spruce_service_build-production:
+  <<: *spruce_service_template
+  variables:
+    ADDITIONAL_TAGS: "prod-latest"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+
+swagger_staging:
+  extends: .swagger_deploy_template
+  variables:
+    GCS_BUCKET: "spruce-staging-static-content-registry"
+  rules:
+    - if: $CI_COMMIT_REF_NAME != "main"
+
+swagger_production:
+  extends: .swagger_deploy_template
+  variables:
+    GCS_BUCKET: "production-spruce-co-static-content"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+
+sonarqube:  
+  extends: .sonarqube  
+  stage: sonarScan  
+  needs: ["test"]  
+  variables:  
+    SONAR_PROJECT_NAME: "spruceholdings_backend_spruce_services"  
+    SONAR_SOURCES: "."  
+    SONAR_INCLUSIONS: "src/main/**"  
+    SONAR_EXCLUSIONS: "**/test/**,**/build/**,**/resources/**"  
+    SONAR_JACOCO_REPORT_PATHS: "./build/reports/kover/merged/xml/report.xml"  
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+    
+checkmarx:  
+  extends: .checkmarx  
+  stage: cxScan  
+  needs: []  
+  variables:  
+    CX_PROJECT: "Workflow_CICD"  
+    CX_APPLICATION: "timber"  
+    CX_TEAM: "backend"  
+  rules:  
+    - if: $CI_COMMIT_REF_NAME == "main"  

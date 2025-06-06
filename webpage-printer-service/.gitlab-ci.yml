@@ -1,0 +1,25 @@
+default:
+  tags:
+    - build
+
+stages:
+  - build
+
+webpage-printer-service-build:
+  extends: .docker-build
+  stage: build
+  variables:
+    ADDITIONAL_BEFORE_SCRIPT: "cd webpage-printer-service"
+    BUILD_ARGS: "NPM_LOG_LEVEL=notice --target prod"
+  rules:
+    - if: $CI_COMMIT_REF_NAME != "main"
+
+webpage-printer-service-build-production:
+  extends: .docker-build
+  stage: build
+  variables:
+    ADDITIONAL_BEFORE_SCRIPT: "cd webpage-printer-service"
+    BUILD_ARGS: "NPM_LOG_LEVEL=notice --target prod"
+    ADDITIONAL_TAGS: "prod-latest"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"

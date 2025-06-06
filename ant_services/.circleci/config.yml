@@ -1,0 +1,437 @@
+version: 2.1
+orbs:
+  gcp-cli: circleci/gcp-cli@1.8.3
+  lacework: lacework/lacework@1.6.0
+  gcp-artifactory: spruceholdings/google-artifactory-orb@1.1.0
+
+commands:
+  assemble_exclude_cornerstone:
+    description: "Steps to assemble and test service all services"
+    steps:
+      - restore_cache:
+          key: v4-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - run:
+          name: Assemble JAR
+          command: |
+            # Skip this for other nodes
+            if [ "$CIRCLE_NODE_INDEX" == 0 ]; then
+              ./gradlew assemble --max-workers=3 --full-stacktrace -P co.spruce.update-environment-variables=false
+            fi
+      - run:
+          name: Run Tests (Except Cornerstone)
+          command: |
+            ./gradlew test -x :spruce-services:cornerstone:test --max-workers=3 --full-stacktrace
+          environment:
+            JWT_SECRET_KEY: test-jwt-secret-key
+      - save_cache:
+          paths:
+            - ~/.gradle
+          key: v4-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - run:
+          name: Save test results
+          command: |
+            mkdir -p ~/test-results/junit/
+            find . -type f -regex ".*/build/test-results/.*xml" -exec cp {} ~/test-results/junit/ \;
+          when: always
+      - store_test_results:
+          path: ~/test-results
+      - store_artifacts:
+          path: ~/test-results/junit
+  assemble_cornerstone:
+    description: "Steps to assemble cornerstone"
+    steps:
+      - restore_cache:
+          key: v3-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - run:
+          name: Assemble JAR
+          command: |
+            # Skip this for other nodes
+            if [ "$CIRCLE_NODE_INDEX" == 0 ]; then
+              ./gradlew :spruce-services:cornerstone:assemble --full-stacktrace -P co.spruce.update-environment-variables=false
+            fi
+      - run:
+          name: Run Cornerstone Tests
+          command: |
+            ./gradlew :spruce-services:cornerstone:test --full-stacktrace
+          environment:
+            JWT_SECRET_KEY: test-jwt-secret-key
+            RABBITMQ_GRACEFUL_SHUTDOWN_TIMEOUT: 0
+      - save_cache:
+          paths:
+            - ~/.gradle
+          key: v3-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+  upload_all_service_images:
+    description: "Steps to upload all service images to gcp"
+    parameters:
+      tags:
+        type: string
+        default: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - gcp-cli/install:
+          version: 438.0.0
+      - gcp-cli/initialize
+      - build_and_upload_image:
+          image_name: affidavits-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: affidavits-service
+      - build_and_upload_image:
+          image_name: cd-items-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: cd-items-service
+      - build_and_upload_image:
+          image_name: cd-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: cd-service
+      - build_and_upload_image:
+          image_name: closing-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: closing-service
+      - build_and_upload_image:
+          image_name: commitments-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: commitments-service
+      - build_and_upload_image:
+          image_name: documents-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: documents-service
+      - build_and_upload_image:
+          image_name: escrow-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: escrow-service
+      - build_and_upload_image:
+          image_name: lender-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: lender-service
+      - build_and_upload_image:
+          image_name: new-order-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: new-order-service
+      - build_and_upload_image:
+          image_name: policies-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: policies-service
+      - build_and_upload_image:
+          image_name: policy-exceptions-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: policy-exceptions-service
+      - build_and_upload_image:
+          image_name: public-documents-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: public-documents-service
+      - build_and_upload_image:
+          image_name: quotes-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: quotes-service
+      - build_and_upload_image:
+          image_name: settlement-statements-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: settlement-statements-service
+      - build_and_upload_image:
+          image_name: title-reports-service
+          image_tag: << parameters.tags >>
+          gradle_project_name: title-reports-service
+  print_docker_tag:
+    description: "Print Docker Tag"
+    parameters:
+      tag:
+        type: string
+        default: NONE
+    steps:
+      - run:
+          name: Print Docker Tag
+          command: |
+            echo "<< parameters.tag >>"
+  print_swagger_tag:
+    description: "Print Swagger Tag"
+    parameters:
+      tag:
+        type: string
+        default: NONE
+    steps:
+      - run:
+          name: Print Swagger Tag
+          command: |
+            echo "<< parameters.tag >>"
+  build_and_upload_image:
+    description: "Steps to build a service"
+    parameters:
+      image_name:
+        type: string
+      image_tag:
+        type: string
+      gradle_project_name:
+        type: string
+      release:
+        default: false
+        type: boolean
+
+    steps:
+      - gcp-artifactory/build-and-push:
+          registry-url: us-central1-docker.pkg.dev
+          image: << parameters.image_name >>
+          extra_build_args: --build-arg JRE_BUILDER_IMAGE=amazoncorretto:17-alpine --build-arg DOCKER_BASE_IMAGE=alpine:3.21 --target prod
+          tag: << parameters.image_tag >>
+          path: << parameters.gradle_project_name >>
+          docker-context: << parameters.gradle_project_name >>
+          google-project-id: 'unique-perigee-171622'
+          repository: spruce-prod-registry
+
+  push_swagger_to_gcs:
+    description: "Copy Swagger Docs to Google Storage"
+    parameters:
+      working_directory:
+        type: string
+        default: NONE
+      target_storage:
+        type: string
+        default: NONE
+    steps:
+      - run:
+          name: Setup Environment Variables
+          working_directory: << parameters.working_directory >>
+          command: |
+            echo "export STATIC_CONTENT_REGISTRY_NAME=<< parameters.target_storage >>" >> $BASH_ENV
+      - run:
+          name: Push new build artifact to static content registry
+          working_directory: << parameters.working_directory >>
+          command: |
+            gsutil -m -h "Cache-Control:private,max-age=60" cp -r index.html gs://${STATIC_CONTENT_REGISTRY_NAME}/api/v4/${CIRCLE_BRANCH}-${CIRCLE_SHA1}/index.html
+            gsutil -m -h "Cache-Control:private,max-age=60" cp -r swagger_v4.json gs://${STATIC_CONTENT_REGISTRY_NAME}/api/v4/${CIRCLE_BRANCH}-${CIRCLE_SHA1}/swagger_v4.json
+            gsutil acl -r ch -u  AllUsers:R gs://${STATIC_CONTENT_REGISTRY_NAME}/api/v4/${CIRCLE_BRANCH}-${CIRCLE_SHA1}/*
+
+  spruce_services_run_scan:
+    description: "Steps to run a checkmarx scan"
+    steps:
+      - run:
+          name: Setup Environment Variables
+          command: |
+            sed -i "s|password:|password: $CHECKMARX_PW|g" checkmarx/application.yaml
+            sed -i "s|token:|token: $CHECKMARX_ZILLOW_JIRA_TOKEN|g" checkmarx/application.yaml
+      - run:
+          name: Install CxFlow Plugin
+          command: |
+            wget -O checkmarx/cxflow.jar https://github.com/checkmarx-ltd/cx-flow/releases/download/1.6.39/cx-flow-1.6.39-java11.jar && chmod +rwx checkmarx/cxflow.jar
+      - run:
+          name: Execute CxSAST Scan using CxFlow
+          command: |
+            cd checkmarx/ && ./cx-scan.sh
+
+  spruce_services_run_sonarqube:
+    description: 'Steps to run a sonarqube scan'
+    steps:
+      # - restore_cache:
+      #     key: sonarqube-cache
+      - run:
+          name: Install Sonarqube Scanner
+          command: |
+            if [ ! -d ~/project/sonar-scanner ]; then
+              wget -O sonarqube.zip https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip
+              unzip -q sonarqube.zip && mv sonar-scanner*/ sonar-scanner/; echo "sonar.host.url=https://sonarqube.spruce.co" >> sonar-scanner/conf/sonar-scanner.properties
+            fi
+      - run:
+          name: Execute Sonarqube Scanner
+          command: |
+            export PATH="~/project/sonar-scanner/bin:$PATH"
+            sonar-scanner \
+              -Dsonar.projectKey=spruceholdings_backend_spruce_services \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=https://sonarqube.spruce.co \
+              -Dsonar.branch.name=${CIRCLE_BRANCH} \
+              -Dsonar.login=${SONARQUBE_LOGIN}
+      - save_cache:
+          paths:
+            - ~/project/sonar-scanner
+          key: sonarqube-cache
+
+jobs:
+  lacework_scan:
+    docker:
+      - image: cimg/base:2024.10
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - gcp-cli/install:
+          version: 438.0.0
+      - gcp-cli/initialize
+      # - gcr/gcr-auth
+      - run:
+          name: Artifact registry auth
+          command: |
+            gcloud auth configure-docker us-central1-docker.pkg.dev
+      - run:
+          name: Creating Artifacts
+          command: |
+            mkdir /tmp/artifacts
+      - run:
+          name: Pull image
+          command: |
+            docker pull us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/spruce-prod-registry/affidavits-service:${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1
+      - run:
+          name: Download Lacework Scanner
+          command: |
+            url=https://raw.githubusercontent.com/lacework/circleci-orb-lacework/master/scripts/install.sh
+            curl ${url} | sudo bash -s -- -v v0.24.0
+      - lacework/inline-scanner-evaluate:
+          image_name: us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/spruce-prod-registry/affidavits-service
+          image_tag: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+          html: true
+          policy: true
+          data-directory: /tmp/artifacts/
+      - run:
+          name: Lacework HTML
+          command: |
+            cat *.html > /tmp/artifacts/lacework
+      - store_artifacts:
+          path: /tmp/artifacts/lacework
+          destination: lacework
+  spruce-services-cornerstone-build:
+    working_directory: ~/project/spruce-services
+    environment:
+      # * resource_class large has 15g memory
+      # * -Xshare:off -- prevents "Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended"
+      JAVA_OPTS: '-Xmx14g -Xms2g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -XX:+HeapDumpOnOutOfMemoryError -Xshare:off'
+      LOG_LEVEL_HIBERNATE_SQL: debug
+    machine:
+      image: ubuntu-2004:2023.07.1
+    resource_class: large
+    steps:
+      - checkout:
+          path: ~/project
+      - assemble_cornerstone
+  spruce-services-build:
+    working_directory: ~/project/spruce-services
+    resource_class: medium+
+    environment:
+      JAVA_OPTS: '-Xmx5g -Xms2g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -XX:+HeapDumpOnOutOfMemoryError'
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - assemble_exclude_cornerstone
+      - upload_all_service_images
+      - print_docker_tag:
+          tag: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+  spruce-services-build-production:
+    working_directory: ~/project/spruce-services
+    resource_class: medium+
+    environment:
+      JAVA_OPTS: '-Xmx5g -Xms2g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -XX:+HeapDumpOnOutOfMemoryError'
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - assemble_exclude_cornerstone
+      - upload_all_service_images:
+          tags: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1,prod-latest"
+      - print_docker_tag:
+          tag: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+
+  spruce-services-swagger_staging:
+    working_directory: ~/project/spruce-services
+    docker:
+      - image: cimg/node:10.17.0
+    steps:
+      - checkout:
+          path: ~/project
+      - gcp-cli/install
+      - gcp-cli/initialize
+      - push_swagger_to_gcs:
+          working_directory: swagger
+          target_storage: spruce-staging-static-content-registry
+      - print_swagger_tag:
+          tag: "$CIRCLE_BRANCH-$CIRCLE_SHA1"
+
+  spruce-services-swagger_production:
+    working_directory: ~/project/spruce-services
+    docker:
+      - image: cimg/node:10.17.0
+    steps:
+      - checkout:
+          path: ~/project
+      - gcp-cli/install
+      - gcp-cli/initialize
+      - push_swagger_to_gcs:
+          working_directory: swagger
+          target_storage: production-spruce-co-static-content
+      - print_swagger_tag:
+          tag: "$CIRCLE_BRANCH-$CIRCLE_SHA1"
+
+  spruce_scan_services:
+    circleci_ip_ranges: true # opts the job into the IP ranges feature
+    working_directory: ~/project/spruce-services
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - spruce_services_run_scan
+
+  spruce_services_sonarqube:
+    circleci_ip_ranges: true # opts the job into the IP ranges feature
+    working_directory: ~/project
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - spruce_services_run_sonarqube
+
+workflows:
+  spruce-services-workflow:
+    jobs:
+      - spruce-services-cornerstone-build:
+          context: service-builds
+      - spruce-services-build:
+          context: service-builds
+          filters:
+            branches:
+              ignore:
+                - main
+      - spruce-services-build-production:
+          context: service-builds
+          filters:
+            branches:
+              only:
+                - main
+      - spruce-services-swagger_staging:
+          context: gcp-gcs-spruce-staging
+      - lacework_scan:
+          context: service-builds
+          requires:
+            - spruce-services-cornerstone-build
+            - spruce-services-build-production
+            - spruce-services-swagger_staging
+            # - spruce-services-swagger_production
+          filters:
+            branches:
+              only:
+                - main
+      - spruce-services-swagger_production:
+          context: service-builds
+          filters:
+            branches:
+              only:
+                - main
+                - /release\/.*/
+
+  sonarqube_scanner:
+    jobs:
+      - spruce_services_sonarqube:
+          context: service-builds
+          filters:
+            branches:
+              only:
+                - main
+
+  spruce_services_vulnerability_scanner:
+    when:
+      and:
+        - equal: [ scheduled_pipeline, << pipeline.trigger_source >> ]
+        - equal: [ "Checkmarx Scan", << pipeline.schedule.name >> ]
+    jobs:
+      - spruce_scan_services:
+          context: service-builds

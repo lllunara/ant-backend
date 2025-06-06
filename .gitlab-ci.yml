@@ -1,0 +1,37 @@
+# .gitlab-ci.yml (Main configuration)
+stages:
+  - triggers
+
+variables:
+  FORCE_ALL: "false" 
+
+trigger-webpage:
+  stage: triggers
+  trigger:
+    include: webpage-printer-service/.gitlab-ci.yml
+    strategy: depend
+  rules:
+    - if: $FORCE_ALL == "true"
+    - changes:
+        - webpage-printer-service/**/*
+
+trigger-timber:
+  stage: triggers
+  trigger:
+    include: timber/.gitlab-ci.yml
+    # working_directory: timber
+    # strategy: depend
+  rules:
+    - if: $FORCE_ALL == "true"
+    - changes:
+        - timber/**/*
+
+trigger-spruce:
+  stage: triggers
+  trigger:
+    include: spruce-services/.gitlab-ci.yml
+    # strategy: depend
+  rules:
+    - if: $FORCE_ALL == "true"
+    - changes:
+        - spruce-services/**/*

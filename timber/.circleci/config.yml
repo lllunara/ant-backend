@@ -1,0 +1,264 @@
+version: 2.1
+orbs:
+  gcp-artifactory: spruceholdings/google-artifactory-orb@1.1.0
+  gcp-cli: circleci/gcp-cli@1.8.3
+  lacework: lacework/lacework@1.6.0
+
+commands:
+  timber_run_scan:
+    description: "Steps to run a checkmarx scan"
+    steps:
+      - run:
+          name: Setup Environment Variables
+          command: |
+            sed -i "s|password:|password: $CHECKMARX_PW|g" checkmarx/application.yaml
+            sed -i "s|token:|token: $CHECKMARX_ZILLOW_JIRA_TOKEN|g" checkmarx/application.yaml
+      - run:
+          name: Install CxFlow Plugin
+          command: |
+            wget -O checkmarx/cxflow.jar https://github.com/checkmarx-ltd/cx-flow/releases/download/1.6.39/cx-flow-1.6.39-java11.jar && chmod +rwx checkmarx/cxflow.jar
+      - run:
+          name: Execute CxSAST Scan using CxFlow
+          command: |
+            cd checkmarx/ && ./cx-scan.sh
+  timber_run_sonarqube:
+    description: 'Steps to run a sonarqube scan'
+    steps:
+      # - restore_cache:
+      #     key: sonarqube-cache
+      - run:
+          name: Install Sonarqube Scanner
+          command: |
+            if [ ! -d ~/project/sonar-scanner ]; then
+              wget -O sonarqube.zip https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.2.1.4610-linux-x64.zip
+              unzip -q sonarqube.zip && mv sonar-scanner*/ sonar-scanner/; echo "sonar.host.url=https://sonarqube.spruce.co" >> sonar-scanner/conf/sonar-scanner.properties
+            fi
+      - run:
+          name: Execute Sonarqube Scanner
+          command: |
+            export PATH="~/project/sonar-scanner/bin:$PATH"
+            sonar-scanner \
+              -Dsonar.projectKey=spruceholdings_backend_timber \
+              -Dsonar.sources=. \
+              -Dsonar.host.url=https://sonarqube.spruce.co \
+              -Dsonar.branch.name=${CIRCLE_BRANCH} \
+              -Dsonar.login=${SONARQUBE_LOGIN} \
+              -Dsonar.java.coveragePlugin=jacoco \
+              -Dsonar.coverage.jacoco.xmlReportPaths="./build/reports/kover/merged/xml/report.xml"
+      - save_cache:
+          paths:
+            - ~/project/sonar-scanner
+          key: sonarqube-cache
+jobs:
+  timber-build:
+    working_directory: ~/project/timber
+    parameters:
+      tags:
+        type: string
+        default: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+    environment:
+      JAVA_OPTS: '-Xmx7g -Xms1g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -XX:+HeapDumpOnOutOfMemoryError'
+    machine:
+      image: ubuntu-2004:2023.07.1
+    resource_class: medium
+    steps:
+      - checkout:
+          path: ~/project
+      - run:
+          name: Validate DB migration names
+          command: ../.githooks/validate-db-migration-names.sh --ci
+      - restore_cache:
+          key: v2-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - restore_cache:
+          key: v2-gradle-cache-{{ checksum "build.gradle.kts" }}
+      - run:
+          name: Assemble JAR
+          command: |
+            ./gradlew clean assemble --full-stacktrace -P co.spruce.update-environment-variables=false -x generateOpenApiDocs
+      - save_cache:
+          paths:
+            - ~/.gradle/wrapper
+          key: v2-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - save_cache:
+          paths:
+            - ~/.gradle/caches
+          key: v2-gradle-cache-{{ checksum "build.gradle.kts" }}
+      - gcp-cli/install:
+          version: 433.0.1
+      - gcp-cli/initialize
+      - gcp-artifactory/build-and-push:
+          registry-url: us-central1-docker.pkg.dev
+          image: timber-service
+          extra_build_args: --build-arg JRE_BUILDER_IMAGE=amazoncorretto:17-alpine --build-arg DOCKER_BASE_IMAGE=alpine:3.21 --target prod
+          tag: << parameters.tags >>
+          google-project-id: 'unique-perigee-171622'
+          repository: spruce-prod-registry
+      - run:
+          name: Print Build Tag
+          command: echo "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+  lacework-scan:
+    working_directory: ~/project/timber
+    docker:
+      - image: cimg/base:2024.10
+    steps:
+      - setup_remote_docker:
+          docker_layer_caching: false
+      - gcp-cli/install:
+          version: 438.0.0
+      - gcp-cli/initialize
+      - run:
+          name: Artifact registry auth
+          command: |
+            gcloud auth configure-docker us-central1-docker.pkg.dev
+      - run:
+          name: Creating Artifacts
+          command: |
+            mkdir /tmp/artifacts
+      - run:
+          name: Pull image
+          command: |
+            docker pull us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/spruce-prod-registry/timber-service:${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1
+      - run:
+          name: Download Lacework Scanner
+          command: |
+            url=https://raw.githubusercontent.com/lacework/circleci-orb-lacework/master/scripts/install.sh
+            curl ${url} | sudo bash -s -- -v v0.24.0
+      - lacework/inline-scanner-evaluate:
+          image_name: us-central1-docker.pkg.dev/$GOOGLE_PROJECT_ID/spruce-prod-registry/timber-service
+          image_tag: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1"
+          html: true
+          policy: true
+          data-directory: /tmp/artifacts/
+      - run:
+          name: Lacework HTML
+          command: |
+            cat *.html > /tmp/artifacts/lacework
+      - store_artifacts:
+          path: /tmp/artifacts/lacework
+          destination: lacework
+  timber-tests:
+    working_directory: ~/project/timber
+    environment:
+      JAVA_OPTS: '-Xmx14g -Xms2g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -XX:+HeapDumpOnOutOfMemoryError'
+    machine:
+      image: ubuntu-2004:2023.07.1
+    resource_class: large
+    steps:
+      - checkout:
+          path: ~/project
+      - restore_cache:
+          key: v2-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - restore_cache:
+          key: v2-gradle-cache-{{ checksum "build.gradle.kts" }}
+      - run:
+          name: Run tests
+          command: |
+            ./gradlew koverVerify
+      - run:
+          name: Generate Coverage XML
+          command: |
+            ./gradlew --info koverMergedXmlReport --full-stacktrace
+      - store_test_results:
+          # Upload test results for display in Test Summary: https://circleci.com/docs/2.0/collect-test-data/
+          path: build/test-results/test
+      - store_artifacts:
+          # Upload test results for display in Artifacts: https://circleci.com/docs/2.0/artifacts/
+          path: build/test-results/test
+      - persist_to_workspace:
+          # Upload coverage for sonarqube: https://circleci.com/docs/workspaces/
+          root: .
+          paths:
+            - build/reports/kover/merged/xml/report.xml
+
+  timber-integration-tests:
+    working_directory: ~/project/timber
+    environment:
+      JAVA_OPTS: '-Xmx14g -Xms2g -XX:MaxGCPauseMillis=70 -XX:MaxHeapFreeRatio=70 -Dspring.test.context.cache.maxSize=1'
+    machine:
+      image: ubuntu-2004:2023.07.1
+    resource_class: large
+    steps:
+      - checkout:
+          path: ~/project
+      - restore_cache:
+          key: v2-gradle-wrapper-{{ checksum "gradle/wrapper/gradle-wrapper.properties" }}
+      - restore_cache:
+          key: v2-gradle-cache-{{ checksum "build.gradle.kts" }}
+      - run:
+          name: Run integration tests
+          command: |
+            ./gradlew testIntegration
+      - store_test_results:
+          # Upload integration test results for display in Test Summary: https://circleci.com/docs/2.0/collect-test-data/
+          path: build/test-results/testIntegration
+      - store_artifacts:
+          # Upload integration test results for display in Artifacts: https://circleci.com/docs/2.0/artifacts/
+          path: build/test-results/testIntegration
+      - store_artifacts:
+          path: testIntegration.hprof
+
+  timber_scan_services:
+    circleci_ip_ranges: true # opts the job into the IP ranges feature
+    working_directory: ~/project/timber
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - timber_run_scan
+
+  timber_sonarqube:
+    circleci_ip_ranges: true # opts the job into the IP ranges feature
+    working_directory: ~/project
+    docker:
+      - image: cimg/openjdk:17.0.7
+    steps:
+      - checkout:
+          path: ~/project
+      - attach_workspace:
+          at: ./
+      - timber_run_sonarqube
+
+workflows:
+  timber-workflow:
+    jobs:
+      - timber-build:
+          context: service-builds
+          filters:
+            branches:
+              ignore:
+                - main
+      - timber-build:
+          name: timber-build-production
+          context: service-builds
+          tags: "${CIRCLE_BRANCH//\//-}-$CIRCLE_SHA1,prod-latest"
+          filters:
+            branches:
+              only:
+                - main
+      - timber-tests:
+          context: service-builds
+      - timber-integration-tests:
+          context: service-builds
+      - lacework-scan:
+          context: service-builds
+          filters:
+            branches:
+              only:
+                - main
+          requires:
+            - timber-build-production
+            - timber-tests
+      - timber_sonarqube:
+          requires:
+            - timber-tests
+          context: service-builds
+
+  timber_vulnerability_scanner:
+    when:
+      and:
+        - equal: [ scheduled_pipeline, << pipeline.trigger_source >> ]
+        - equal: [ "Checkmarx Scan", << pipeline.schedule.name >> ]
+    jobs:
+      - timber_scan_services:
+          context: service-builds

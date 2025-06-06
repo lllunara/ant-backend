@@ -1,0 +1,140 @@
+default:  
+  tags:  
+    - build  
+
+include:  
+  project: spruce-engineering/devops/shared/gitlab-templates  
+  file:  
+    - docker-build.yml  
+    - checkmarx.yml  
+    - sonarqube.yml  
+
+stages:  
+  - build  
+  - test  
+  - sonarScan  
+  - cxScan  
+
+
+before_script: 
+  - cd timber/
+
+assemble_jar:  
+  stage: build
+  image: gitlab.docker.artifactory.ztools.net/gradle:8.0.2-jdk17-alpine  
+  variables:
+    JWT_SECRET_KEY: "test-jwt-secret-key"
+  needs: []  
+  cache:  
+  - key:  
+      files:  
+        - gradle/wrapper/gradle-wrapper.properties  
+      prefix: gradle-wrapper-cache  
+    paths:  
+      - .gradle/wrapper/  
+  - key:  
+      files:  
+        - build.gradle.kts  
+      prefix: gradle-build-cache  
+    paths:  
+      - .gradle/caches/
+  script:  
+    - ./gradlew clean assemble --full-stacktrace -P co.spruce.update-environment-variables=false -x generateOpenApiDocs
+  artifacts:  
+    paths:  
+      - 
+ 
+
+timber-build:  
+  extends: .docker-build  
+  stage: build  
+  variables:  
+    ADDITIONAL_BEFORE_SCRIPT: "apk add --update bash && ../.githooks/validate-db-migration-names.sh --ci"  
+    IMAGE_NAME: "timber"  
+    BUILD_ARGS: "--JRE_BUILDER_IMAGE=amazoncorretto:17-alpine,DOCKER_BASE_IMAGE=alpine:3.21"  
+    CACHE_FROM: "$GAR_LOCATION-docker.pkg.dev/$GAR_PROJECT_ID/$GAR_REPOSITORY_NAME/$IMAGE_NAME:prod-latest"
+  rules:
+    - if: $CI_COMMIT_REF_NAME != "main"  
+
+timber-build-production:
+  extends: .docker-build  
+  stage: build  
+  variables:  
+    ADDITIONAL_BEFORE_SCRIPT: "apk add --update bash && ../.githooks/validate-db-migration-names.sh --ci"  
+    IMAGE_NAME: "timber"  
+    BUILD_ARGS: "--JRE_BUILDER_IMAGE=amazoncorretto:17-alpine DOCKER_BASE_IMAGE=alpine:3.21"  
+    CACHE_FROM: "$GAR_LOCATION/.docker.pkg.dev/$GAR_PROJECT_ID/$GAR_REPOSITORY_NAME/$IMAGE_NAME:prod-latest"  
+    ADDITIONAL_TAGS: "prod-latest"
+  rules:  
+    - if: $CI_COMMIT_REF_NAME == "main"
+
+test:  
+  stage: test  
+  image: gitlab.docker.artifactory.ztools.net/gradle:8.0.2-jdk17-alpine  
+  needs: []  
+  cache:  
+  - key:  
+      files:  
+        - gradle/wrapper/gradle-wrapper.properties  
+      prefix: gradle-wrapper-cache  
+    paths:  
+      - .gradle/wrapper/  
+  - key:  
+      files:  
+        - build.gradle.kts  
+      prefix: gradle-build-cache  
+    paths:  
+      - .gradle/.caches/  
+  script:  
+    - ./gradlew koverVerify 
+    - ./gradlew --info koverMergedXmlReport --full-stacktrace  
+  artifacts:  
+    paths:  
+      - build/test-results/test  
+      - build/reports/kover/merged/xml/report.xml 
+
+integration_test:  
+  stage: test  
+  image: gitlab.docker.artifactory.ztools.net/gradle:8.0.2-jdk17-alpine  
+  needs: []  
+  cache:  
+  - key:  
+      files:  
+        - gradle/wrapper/gradle-wrapper.properties  
+      prefix: gradle-wrapper-cache  
+    paths:  
+      - .gradle/wrapper/  
+  - key:  
+      files:  
+        - build.gradle.kts  
+      prefix: gradle-build-cache  
+    paths:  
+      - .gradle/.caches/  
+  script:  
+    ./gradlew testIntegration  
+  artifacts:  
+    paths:  
+      - build/test-results/testIntegration  
+      - testIntegration.hprof 
+
+sonarqube:  
+  extends: .sonarqube  
+  stage: sonarScan  
+  needs: ["test"]  
+  variables:  
+    SONAR_PROJECT_NAME: "spruceholdings_backend_timber"  
+    SONAR_SOURCES: "."  
+    SONAR_INCLUSIONS: "src/main/**"  
+    SONAR_EXCLUSIONS: "**/test/**,**/build/**,**/resources/**"  
+    SONAR_JACOCO_REPORT_PATHS: "./build/reports/kover/merged/xml/report.xml"  
+    
+checkmarx:  
+  extends: .checkmarx  
+  stage: cxScan  
+  needs: []  
+  variables:  
+    CX_PROJECT: "Timber_CICD"  
+    CX_APPLICATION: "timber"  
+    CX_TEAM: "backend"  
+  rules:  
+    - if: $CI_COMMIT_REF_NAME == "main"  
