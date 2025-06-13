@@ -1,37 +1,104 @@
-# .gitlab-ci.yml (Main configuration)
-stages:
-  - triggers
+# # .gitlab-ci.yml (Main configuration)
+# stages:
+#   - triggers
 
-variables:
-  FORCE_ALL: "false" 
+# variables:
+#   FORCE_ALL: "false" 
 
-trigger-webpage:
-  stage: triggers
-  trigger:
-    include: webpage-printer-service/.gitlab-ci.yml
-    strategy: depend
+# trigger-webpage:
+#   stage: triggers
+#   trigger:
+#     include: webpage-printer-service/.gitlab-ci.yml
+#     strategy: depend
+#   rules:
+#     - if: $FORCE_ALL == "true"
+#     - changes:
+#         - webpage-printer-service/**/*
+
+# trigger-timber:
+#   stage: triggers
+#   trigger:
+#     include: timber/.gitlab-ci.yml
+#     # working_directory: timber
+#     # strategy: depend
+#   rules:
+#     - if: $FORCE_ALL == "true"
+#     - changes:
+#         - timber/**/*
+
+# trigger-spruce:
+#   stage: triggers
+#   trigger:
+#     include: spruce-services/.gitlab-ci.yml
+#     # strategy: depend
+#   rules:
+#     - if: $FORCE_ALL == "true"
+#     - changes:
+#         - spruce-services/**/*
+
+# prepare-deploy:
+#   stage: deploy
+#   image: gitlab-docker.artifactory.zgtools.net/alpine/curl:8.12.1
+#   needs: ["build", "test"]
+#   script:
+#     - |
+#       if [ "$CI_COMMIT_REF_NAME" = "main" ]; then
+#         # Extract source branch from merge commit message (after merge to main)
+#         source_branch=$(echo "$CI_COMMIT_MESSAGE" | sed -n "s/.Merge branch '\([^']\)' into.*/\1/p")
+#         if [ -n "$source_branch" ] && [ "$source_branch" != "main" ]; then
+#           trigger_branch_name="$source_branch"
+#         else
+#           echo "No source branch found in merge commit message. Exiting..."
+#           exit 1
+#         fi
+#       else
+#         # Use current branch name (for release branches)
+#         trigger_branch_name="$CI_COMMIT_REF_NAME"
+#       fi
+#     - 'echo "Using trigger branch: $trigger_branch_name"'
+#     - >
+#       curl --request POST --header "PRIVATE-TOKEN: $SPRUCE_PROD_DEPLOYMENT_TOKEN" --fail-with-body --silent --show-error
+#       "https://gitlab.zgtools.net/api/v4/projects/$SPRUCE_PROD_PROJECT_ID/repository/branches?branch=$trigger_branch_name&ref=main"
+#       || echo "Branch $trigger_branch_name in project $SPRUCE_PROD_PROJECT_ID already exists. Continuing..."
+#     - echo "trigger_branch_name=$trigger_branch_name" > trigger-branch.env
+#   artifacts:
+#     reports:
+#       dotenv: trigger-branch.env
+#     expire_in: 1 hour
+#   rules:
+#     - if: '$CI_COMMIT_BRANCH =~ /^release.*/ || $CI_COMMIT_REF_NAME == "main"'
+
+# deploy:
+#   stage: deploy
+#   needs: ["build", "prepare-deploy"]
+#   trigger:
+#     project: spruce/spruce-engineering/devops/spruce-production
+#     branch: "$trigger_branch_name"
+#     forward:
+#       pipeline_variables: true
+#   variables:
+#    TIMBER_IMAGE_TAG: "$timber_image_tag"
+#   rules:
+#     - if: '$CI_COMMIT_BRANCH =~ /^release.*/ || $CI_COMMIT_REF_NAME == "main"'
+
+tag-release:
+  stage: tag
+  image: alpine:latest
+  script:
+    - apk add --no-cache git
+    - |
+      if [ -z "$TAG_NAME" ]; then
+        echo "No TAG_NAME provided, skipping tag."
+        exit 0
+      fi
+      # Check if tag already exists
+      if git ls-remote --tags origin | grep "refs/tags/$TAG_NAME$"; then
+        echo "Tag $TAG_NAME already exists, skipping."
+        exit 0
+      fi
+      # Create and push tag
+      git tag "$TAG_NAME"
+      git push origin "$TAG_NAME"
   rules:
-    - if: $FORCE_ALL == "true"
-    - changes:
-        - webpage-printer-service/**/*
-
-trigger-timber:
-  stage: triggers
-  trigger:
-    include: timber/.gitlab-ci.yml
-    # working_directory: timber
-    # strategy: depend
-  rules:
-    - if: $FORCE_ALL == "true"
-    - changes:
-        - timber/**/*
-
-trigger-spruce:
-  stage: triggers
-  trigger:
-    include: spruce-services/.gitlab-ci.yml
-    # strategy: depend
-  rules:
-    - if: $FORCE_ALL == "true"
-    - changes:
-        - spruce-services/**/*
+    - if: '$TAG_NAME'
+      when: always
